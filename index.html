@@ -1,0 +1,463 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voting DApp</title>
+    <!-- Bootstrap CSS for basic styling -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Web3.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/web3@1.7.4/dist/web3.min.js"></script>
+    <style>
+        body { padding: 20px; }
+        .container { max-width: 800px; }
+        .section { margin-bottom: 20px; }
+        .status { color: green; }
+        .error { color: red; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Voting DApp</h1>
+
+        <!-- Wallet Connection -->
+        <div class="section">
+            <h3>Wallet</h3>
+            <button id="connectWallet" class="btn btn-primary">Connect Wallet</button>
+            <p id="accountStatus">Wallet not connected</p>
+        </div>
+
+        <!-- Contract Info -->
+        <div class="section">
+            <h3>Contract Info</h3>
+            <p>Contract Address: <span id="contractAddress"></span></p>
+            <p>Proposal Name: <span id="proposalName"></span></p>
+            <p>Vote Count: <span id="voteCount"></span></p>
+            <p>Total Voters: <span id="totalVoters"></span></p>
+            <p>Current State: <span id="currentState"></span></p>
+            <p>Voter Status: <span id="voterStatus"></span></p>
+            <p>Has Voted: <span id="hasVoted"></span></p>
+        </div>
+
+        <!-- Owner Actions -->
+        <div class="section" id="ownerActions">
+            <h3>Owner Actions</h3>
+            <button id="startVoting" class="btn btn-success">Start Voting</button>
+            <button id="endVoting" class="btn btn-danger">End Voting</button>
+        </div>
+
+        <!-- Voter Actions -->
+        <div class="section" id="voterActions">
+            <h3>Voter Actions</h3>
+            <div class="mb-3">
+                <label for="commitSecret" class="form-label">Commit Secret</label>
+                <input type="text" id="commitSecret" class="form-control" placeholder="Enter secret">
+                <label for="commitVote" class="form-label">Vote (Yes/No)</label>
+                <select id="commitVote" class="form-select">
+                    <option value="true">Yes</option>
+                    <option value="false">No</option>
+                </select>
+                <button id="commitVote" class="btn btn-primary mt-2">Commit Vote</button>
+            </div>
+            <div class="mb-3">
+                <label for="revealSecret" class="form-label">Reveal Secret</label>
+                <input type="text" id="revealSecret" class="form-control" placeholder="Enter secret">
+                <label for="revealVote" class="form-label">Vote (Yes/No)</label>
+                <select id="revealVote" class="form-select">
+                    <option value="true">Yes</option>
+                    <option value="false">No</option>
+                </select>
+                <button id="revealVote" class="btn btn-primary mt-2">Reveal Vote</button>
+            </div>
+        </div>
+
+        <!-- Status Messages -->
+        <div class="section">
+            <h3>Status</h3>
+            <p id="statusMessage" class="status"></p>
+            <p id="errorMessage" class="error"></p>
+        </div>
+    </div>
+
+    <script>
+        // Contract configuration
+        const contractAddress = "0xE4241745540e3990E1cDDD1086d119ACc215A592"; // Replace with your deployed contract address
+        const contractABI = [
+            {
+                "inputs": [
+                    {"internalType": "address[]", "name": "_voters", "type": "address[]"},
+                    {"internalType": "string", "name": "_proposalName", "type": "string"}
+                ],
+                "stateMutability": "nonpayable",
+                "type": "constructor"
+            },
+            {
+                "anonymous": false,
+                "inputs": [
+                    {"indexed": true, "internalType": "address", "name": "previousOwner", "type": "address"},
+                    {"indexed": true, "internalType": "address", "name": "newOwner", "type": "address"}
+                ],
+                "name": "OwnershipTransferred",
+                "type": "event"
+            },
+            {
+                "anonymous": false,
+                "inputs": [
+                    {"indexed": true, "internalType": "address", "name": "voter", "type": "address"},
+                    {"indexed": false, "internalType": "bytes32", "name": "commitment", "type": "bytes32"}
+                ],
+                "name": "VoteCommitted",
+                "type": "event"
+            },
+            {
+                "anonymous": false,
+                "inputs": [
+                    {"indexed": true, "internalType": "address", "name": "voter", "type": "address"}
+                ],
+                "name": "VoteRevealed",
+                "type": "event"
+            },
+            {
+                "anonymous": false,
+                "inputs": [
+                    {"indexed": true, "internalType": "address", "name": "voter", "type": "address"}
+                ],
+                "name": "VoterRegistered",
+                "type": "event"
+            },
+            {
+                "anonymous": false,
+                "inputs": [],
+                "name": "VotingEnded",
+                "type": "event"
+            },
+            {
+                "anonymous": false,
+                "inputs": [],
+                "name": "VotingStarted",
+                "type": "event"
+            },
+            {
+                "inputs": [{"internalType": "bytes32", "name": "_commitment", "type": "bytes32"}],
+                "name": "commitVote",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "endVoting",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "getProposal",
+                "outputs": [
+                    {"internalType": "string", "name": "name", "type": "string"},
+                    {"internalType": "uint256", "name": "voteCount", "type": "uint256"}
+                ],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "getTotalEligibleVoters",
+                "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [{"internalType": "address", "name": "_voter", "type": "address"}],
+                "name": "hasVoted",
+                "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [{"internalType": "address", "name": "_voter", "type": "address"}],
+                "name": "isVoterRegistered",
+                "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "owner",
+                "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "renounceOwnership",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function"
+            },
+            {
+                "inputs": [
+                    {"internalType": "bool", "name": "_voteYes", "type": "bool"},
+                    {"internalType": "bytes32", "name": "_secret", "type": "bytes32"}
+                ],
+                "name": "revealVote",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "startVoting",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "state",
+                "outputs": [{"internalType": "enum Voting.State", "name": "", "type": "uint8"}],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [{"internalType": "address", "name": "newOwner", "type": "address"}],
+                "name": "transferOwnership",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function"
+            }
+        ];
+
+        // Initialize Web3 and contract
+        let web3, contract, account;
+        const stateNames = ["Created", "Voting", "Ended"];
+
+        async function init() {
+            console.log("Initializing DApp...");
+            if (!window.ethereum) {
+                showError("MetaMask is not installed. Please install MetaMask to use this DApp.");
+                return;
+            }
+            try {
+                web3 = new Web3(window.ethereum);
+                contract = new web3.eth.Contract(contractABI, contractAddress);
+                document.getElementById("contractAddress").textContent = contractAddress;
+                console.log("Web3 and contract initialized successfully.");
+                updateUI();
+            } catch (error) {
+                showError("Failed to initialize Web3: " + error.message);
+                console.error("Init error:", error);
+            }
+        }
+
+        // Connect wallet
+        document.getElementById("connectWallet").onclick = async () => {
+            console.log("Connect Wallet button clicked.");
+            if (!window.ethereum) {
+                showError("MetaMask is not installed. Please install it and try again.");
+                return;
+            }
+            try {
+                console.log("Requesting accounts from MetaMask...");
+                const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+                if (accounts.length === 0) {
+                    showError("No accounts selected. Please select an account in MetaMask.");
+                    return;
+                }
+                account = accounts[0];
+                document.getElementById("accountStatus").textContent = `Connected: ${account}`;
+                showStatus("Wallet connected successfully!");
+                console.log("Connected account:", account);
+                updateUI();
+            } catch (error) {
+                showError("Failed to connect wallet: " + error.message);
+                console.error("Connect wallet error:", error);
+            }
+        };
+
+        // Update UI with contract data
+        async function updateUI() {
+            if (!account || !contract) {
+                console.log("UI update skipped: No account or contract available.");
+                return;
+            }
+            try {
+                console.log("Updating UI with contract data...");
+                // Get contract state
+                const state = await contract.methods.state().call();
+                document.getElementById("currentState").textContent = stateNames[state];
+
+                // Get proposal details
+                const proposal = await contract.methods.getProposal().call();
+                document.getElementById("proposalName").textContent = proposal.name || "N/A";
+                document.getElementById("voteCount").textContent = proposal.voteCount || "0";
+
+                // Get total voters
+                const totalVoters = await contract.methods.getTotalEligibleVoters().call();
+                document.getElementById("totalVoters").textContent = totalVoters;
+
+                // Get voter status
+                const isRegistered = await contract.methods.isVoterRegistered(account).call();
+                document.getElementById("voterStatus").textContent = isRegistered ? "Registered" : "Not Registered";
+
+                // Get voting status
+                const hasVoted = await contract.methods.hasVoted(account).call();
+                document.getElementById("hasVoted").textContent = hasVoted ? "Yes" : "No";
+
+                // Show/hide owner actions
+                const owner = await contract.methods.owner().call();
+                const isOwner = account.toLowerCase() === owner.toLowerCase();
+                document.getElementById("ownerActions").classList.toggle("hidden", !isOwner);
+
+                // Show/hide buttons based on state
+                document.getElementById("startVoting").classList.toggle("hidden", state != 0 || !isOwner);
+                document.getElementById("endVoting").classList.toggle("hidden", state != 1 || !isOwner);
+                document.getElementById("voterActions").classList.toggle("hidden", state != 1 || !isRegistered);
+
+                console.log("UI updated successfully.");
+            } catch (error) {
+                showError("Error fetching contract data: " + error.message);
+                console.error("UI update error:", error);
+            }
+        }
+
+        // Start voting
+        document.getElementById("startVoting").onclick = async () => {
+            try {
+                console.log("Starting voting...");
+                await contract.methods.startVoting().send({ from: account });
+                showStatus("Voting started successfully!");
+                updateUI();
+            } catch (error) {
+                showError("Failed to start voting: " + error.message);
+                console.error("Start voting error:", error);
+            }
+        };
+
+        // End voting
+        document.getElementById("endVoting").onclick = async () => {
+            try {
+                console.log("Ending voting...");
+                await contract.methods.endVoting().send({ from: account });
+                showStatus("Voting ended successfully!");
+                updateUI();
+            } catch (error) {
+                showError("Failed to end voting: " + error.message);
+                console.error("End voting error:", error);
+            }
+        };
+
+        // Commit vote
+        document.getElementById("commitVote").onclick = async () => {
+            const secret = document.getElementById("commitSecret").value.trim();
+            const vote = document.getElementById("commitVote").value === "true";
+            if (!secret) {
+                showError("Please enter a secret.");
+                return;
+            }
+            try {
+                console.log("Committing vote with secret:", secret, "vote:", vote);
+                const commitment = web3.utils.keccak256(
+                    web3.eth.abi.encodeParameters(["bool", "string", "address"], [vote, secret, account])
+                );
+                await contract.methods.commitVote(commitment).send({ from: account });
+                showStatus("Vote committed successfully!");
+                updateUI();
+            } catch (error) {
+                showError("Failed to commit vote: " + error.message);
+                console.error("Commit vote error:", error);
+            }
+        };
+
+        // Reveal vote
+        document.getElementById("revealVote").onclick = async () => {
+            const secret = document.getElementById("revealSecret").value.trim();
+            const vote = document.getElementById("revealVote").value === "true";
+            if (!secret) {
+                showError("Please enter a secret.");
+                return;
+            }
+            try {
+                console.log("Revealing vote with secret:", secret, "vote:", vote);
+                await contract.methods.revealVote(vote, web3.utils.utf8ToHex(secret)).send({ from: account });
+                showStatus("Vote revealed successfully!");
+                updateUI();
+            } catch (error) {
+                showError("Failed to reveal vote: " + error.message);
+                console.error("Reveal vote error:", error);
+            }
+        };
+
+        // Utility functions
+        function showStatus(message) {
+            document.getElementById("statusMessage").textContent = message;
+            document.getElementById("errorMessage").textContent = "";
+            setTimeout(() => document.getElementById("statusMessage").textContent = "", 5000);
+        }
+
+        function showError(message) {
+            document.getElementById("errorMessage").textContent = message;
+            document.getElementById("statusMessage").textContent = "";
+            setTimeout(() => document.getElementById("errorMessage").textContent = "", 5000);
+        }
+
+        // Initialize on page load
+        window.addEventListener("load", init);
+
+        // Handle account changes
+        window.ethereum?.on("accountsChanged", (accounts) => {
+            console.log("Accounts changed:", accounts);
+            account = accounts[0];
+            document.getElementById("accountStatus").textContent = account ? `Connected: ${account}` : "Wallet not connected";
+            updateUI();
+        });
+
+        // Handle chain changes
+        window.ethereum?.on("chainChanged", () => {
+            console.log("Network changed.");
+            updateUI();
+        });
+    </script>
+</body>
+</html>
